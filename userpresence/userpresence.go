@@ -88,30 +88,19 @@ func (up *UserPresence) promptFingerprint(req *request, prompt string) {
 	ctx, cancel := context.WithTimeout(context.Background(), req.timeout)
 	defer cancel()
 
-	// Get the original user (when running under sudo)
-	sudoUser := os.Getenv("SUDO_USER")
-	if sudoUser == "" {
-		sudoUser = os.Getenv("USER")
-	}
-	log.Printf("userpresence: sudo_user=%s, prompt=%s", sudoUser, prompt)
+	log.Printf("userpresence: prompt=%s", prompt)
 
 	// Send notification to user (non-blocking)
-	notifyCmd := exec.Command("sudo", "-u", sudoUser,
-		"DISPLAY=:0", "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus",
-		"notify-send", "-u", "critical", "-t", "30000",
+	notifyCmd := exec.Command("notify-send", "-u", "critical", "-t", "30000",
 		"TPM-FIDO", prompt+"\n\nTouch fingerprint sensor to confirm.")
-	notifyCmd.Env = append(os.Environ(),
-		"DISPLAY=:0",
-		"DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus",
-	)
 	if err := notifyCmd.Start(); err != nil {
 		log.Printf("userpresence: notify-send failed to start: %v", err)
 		// Continue anyway - fingerprint verification is the important part
 	}
 
-	// Run fprintd-verify as the original user (not root) with context timeout
-	log.Printf("userpresence: launching fprintd-verify for user %s", sudoUser)
-	fprintCmd := exec.CommandContext(ctx, "sudo", "-u", sudoUser, "fprintd-verify")
+	// Run fprintd-verify with context timeout
+	log.Printf("userpresence: launching fprintd-verify")
+	fprintCmd := exec.CommandContext(ctx, "fprintd-verify")
 	fprintCmd.Stdout = os.Stdout
 	fprintCmd.Stderr = os.Stderr
 

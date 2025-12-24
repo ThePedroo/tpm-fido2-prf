@@ -4,7 +4,7 @@ package ctap2
 func (h *Handler) GetInfo() *GetInfoResponse {
 	return &GetInfoResponse{
 		// Supported protocol versions
-		Versions: []string{"U2F_V2", "FIDO_2_0", "FIDO_2_1"},
+		Versions: []string{"FIDO_2_0", "FIDO_2_1"},
 
 		// Supported extensions
 		Extensions: []string{"hmac-secret"},
@@ -14,10 +14,10 @@ func (h *Handler) GetInfo() *GetInfoResponse {
 
 		// Authenticator options
 		Options: map[string]bool{
-			"rk":   false, // Resident keys not supported (no persistent storage)
-			"up":   true,  // User presence supported via fingerprint
-			"uv":   true,  // User verification via fingerprint (enables hmac-secret without PIN)
-			"plat": false, // Not a platform authenticator
+			"rk":   true, // Resident keys supported (stored in ~/.local/share/tpm-fido/)
+			"up":   true, // User presence supported via fingerprint
+			"uv":   true, // User verification via fingerprint (enables hmac-secret without PIN)
+			"plat": true, // Platform authenticator (Native Messaging)
 		},
 
 		// Maximum message size
@@ -33,8 +33,8 @@ func (h *Handler) GetInfo() *GetInfoResponse {
 		// Maximum credential ID length
 		MaxCredentialIdLength: 256,
 
-		// Supported transports
-		Transports: []string{"usb"},
+		// Supported transports - internal for platform authenticator
+		Transports: []string{"internal"},
 
 		// Supported algorithms
 		Algorithms: []PublicKeyCredentialParameters{
