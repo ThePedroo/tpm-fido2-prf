@@ -31,7 +31,7 @@ func (h *Handler) GetInfo() *GetInfoResponse {
 		MaxCredentialCountInList: 8,
 
 		// Maximum credential ID length
-		MaxCredentialIdLength: 128,
+		MaxCredentialIdLength: 256,
 
 		// Supported transports
 		Transports: []string{"usb"},
