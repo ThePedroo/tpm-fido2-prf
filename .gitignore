@@ -1,2 +1,5 @@
 tpm-fido
 tpmfido
+tpm-fido-static
+dist/
+build/
