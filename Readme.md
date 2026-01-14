@@ -2,6 +2,32 @@
 
 tpm-fido is a FIDO2/WebAuthn platform authenticator for Linux that protects credential keys using your system's TPM (Trusted Platform Module). It works with Chrome/Chromium via Native Messaging and supports the PRF (Pseudo-Random Function) extension for deriving cryptographic material from credentials.
 
+## Quick Installation
+
+Install with one command:
+
+```bash
+curl -sSL https://raw.githubusercontent.com/vitorpy/tpm-fido2-prf/main/scripts/install-latest.sh | bash
+```
+
+Or download the [latest release](https://github.com/vitorpy/tpm-fido2-prf/releases/latest) and run:
+
+```bash
+tar -xzf tpm-fido-*-complete.tar.gz
+cd tpm-fido-*/
+./install.sh
+```
+
+This installs both the native binary and Chrome extension with a smart installer that checks prerequisites and guides you through setup.
+
+### What Gets Installed
+
+- **Binary**: `~/bin/tpm-fido` (4.5MB static binary)
+- **Extension**: `~/.local/share/tpm-fido-extension/`
+- **Native messaging manifest**: `~/.config/{google-chrome,chromium}/NativeMessagingHosts/`
+
+After installation, the script will automatically open chrome://extensions. Follow the on-screen instructions to load the extension from `~/.local/share/tpm-fido-extension/`.
+
 ## Features
 
 - **TPM-backed keys**: Private keys never leave the TPM

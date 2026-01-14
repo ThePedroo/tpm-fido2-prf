@@ -10,12 +10,15 @@ LDFLAGS := -s -w -X main.version=$(VERSION) -X main.buildTime=$(BUILD_TIME)
 BUILD_DIR := build
 DIST_DIR := dist
 
+# Extension repository (sibling directory)
+EXTENSION_REPO := ../tpm-fido2-extension
+
 # Static build configuration
 CC := musl-gcc
 CGO_ENABLED := 1
 STATIC_LDFLAGS := -linkmode external -extldflags '-static' $(LDFLAGS)
 
-.PHONY: all clean build static test install uninstall dist help
+.PHONY: all clean build static test install uninstall dist dist-complete help
 
 # Default target
 all: static
@@ -65,7 +68,7 @@ uninstall:
 	rm -f $(HOME)/.config/chromium/NativeMessagingHosts/com.vitorpy.tpmfido.json
 	@echo "Uninstalled"
 
-# Create distribution package
+# Create distribution package (binary only)
 dist: static
 	@echo "Creating distribution package..."
 	@rm -rf $(DIST_DIR)
@@ -91,6 +94,54 @@ dist: static
 	@cd $(DIST_DIR) && tar czf $(BINARY_NAME)-$(VERSION)-linux-x86_64-static.tar.gz $(BINARY_NAME)-$(VERSION)
 	@echo "Distribution package created: $(DIST_DIR)/$(BINARY_NAME)-$(VERSION)-linux-x86_64-static.tar.gz"
 
+# Create complete distribution package (binary + extension)
+dist-complete: static
+	@echo "Creating complete distribution package (binary + extension)..."
+	@if [ ! -d "$(EXTENSION_REPO)" ]; then \
+		echo "Error: Extension repository not found at $(EXTENSION_REPO)"; \
+		echo "Please clone it or adjust EXTENSION_REPO variable"; \
+		exit 1; \
+	fi
+	@rm -rf $(DIST_DIR)
+	@mkdir -p $(DIST_DIR)/$(BINARY_NAME)-$(VERSION)
+	@mkdir -p $(DIST_DIR)/$(BINARY_NAME)-$(VERSION)/bin
+	@mkdir -p $(DIST_DIR)/$(BINARY_NAME)-$(VERSION)/extension
+	@mkdir -p $(DIST_DIR)/$(BINARY_NAME)-$(VERSION)/native-messaging-hosts
+	@echo "Copying binary..."
+	@cp $(BINARY_NAME) $(DIST_DIR)/$(BINARY_NAME)-$(VERSION)/bin/
+	@echo "Copying extension files..."
+	@cp $(EXTENSION_REPO)/manifest.json $(DIST_DIR)/$(BINARY_NAME)-$(VERSION)/extension/
+	@cp $(EXTENSION_REPO)/background.js $(DIST_DIR)/$(BINARY_NAME)-$(VERSION)/extension/
+	@cp $(EXTENSION_REPO)/content.js $(DIST_DIR)/$(BINARY_NAME)-$(VERSION)/extension/
+	@cp $(EXTENSION_REPO)/inject.js $(DIST_DIR)/$(BINARY_NAME)-$(VERSION)/extension/
+	@cp -r $(EXTENSION_REPO)/icons $(DIST_DIR)/$(BINARY_NAME)-$(VERSION)/extension/
+	@echo "Copying native messaging manifest..."
+	@cp com.vitorpy.tpmfido.json $(DIST_DIR)/$(BINARY_NAME)-$(VERSION)/native-messaging-hosts/
+	@echo "Copying documentation..."
+	@cp Readme.md $(DIST_DIR)/$(BINARY_NAME)-$(VERSION)/ 2>/dev/null || true
+	@cp LICENSE $(DIST_DIR)/$(BINARY_NAME)-$(VERSION)/ 2>/dev/null || true
+	@echo "Copying installation scripts..."
+	@cp scripts/install-template.sh $(DIST_DIR)/$(BINARY_NAME)-$(VERSION)/install.sh
+	@cp scripts/update-template.sh $(DIST_DIR)/$(BINARY_NAME)-$(VERSION)/update.sh
+	@cp scripts/uninstall-template.sh $(DIST_DIR)/$(BINARY_NAME)-$(VERSION)/uninstall.sh
+	@cp scripts/test-connection-template.sh $(DIST_DIR)/$(BINARY_NAME)-$(VERSION)/test-connection.sh
+	@chmod +x $(DIST_DIR)/$(BINARY_NAME)-$(VERSION)/*.sh
+	@echo "Creating tarball..."
+	@cd $(DIST_DIR) && tar czf $(BINARY_NAME)-$(VERSION)-linux-x86_64-complete.tar.gz $(BINARY_NAME)-$(VERSION)
+	@echo ""
+	@echo "Complete distribution package created: $(DIST_DIR)/$(BINARY_NAME)-$(VERSION)-linux-x86_64-complete.tar.gz"
+	@echo ""
+	@echo "Package contents:"
+	@echo "  - Static binary ($(BINARY_NAME))"
+	@echo "  - Chrome extension (with stable ID)"
+	@echo "  - Installation scripts (install.sh, update.sh, uninstall.sh, test-connection.sh)"
+	@echo "  - Documentation (README.md, LICENSE)"
+	@echo ""
+	@echo "Users can install with:"
+	@echo "  tar -xzf $(BINARY_NAME)-$(VERSION)-linux-x86_64-complete.tar.gz"
+	@echo "  cd $(BINARY_NAME)-$(VERSION)/"
+	@echo "  ./install.sh"
+
 # Clean build artifacts
 clean:
 	@echo "Cleaning build artifacts..."
@@ -103,12 +154,13 @@ help:
 	@echo "TPM-FIDO Build System"
 	@echo ""
 	@echo "Targets:"
-	@echo "  make static       - Build static binary with musl (default, recommended)"
-	@echo "  make build        - Build dynamic binary (development)"
-	@echo "  make static-nocgo - Build pure Go static binary (no C deps)"
-	@echo "  make test         - Run tests"
-	@echo "  make install      - Install binary and Chrome manifest locally"
-	@echo "  make uninstall    - Remove installed files"
-	@echo "  make dist         - Create distribution tarball"
-	@echo "  make clean        - Remove build artifacts"
-	@echo "  make help         - Show this help"
+	@echo "  make static        - Build static binary with musl (default, recommended)"
+	@echo "  make build         - Build dynamic binary (development)"
+	@echo "  make static-nocgo  - Build pure Go static binary (no C deps)"
+	@echo "  make test          - Run tests"
+	@echo "  make install       - Install binary and Chrome manifest locally"
+	@echo "  make uninstall     - Remove installed files"
+	@echo "  make dist          - Create distribution tarball (binary only)"
+	@echo "  make dist-complete - Create complete distribution (binary + extension)"
+	@echo "  make clean         - Remove build artifacts"
+	@echo "  make help          - Show this help"
