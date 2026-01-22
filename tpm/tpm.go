@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"io"
+	"log"
 	"math/big"
 	"sync"
 	"time"
@@ -188,6 +189,29 @@ func (t *TPM) DeriveCredRandom(keyHandle []byte) ([]byte, error) {
 	return mac.Sum(nil), nil
 }
 
+// Verify if the given credential ID is possibly a key handle produced by this TPM implementation.
+func (t *TPM) ValidateKeyHandle(keyHandle []byte) error {
+	dec := lencode.NewDecoder(bytes.NewReader(keyHandle), lencode.SeparatorOpt(separator))
+
+	if _, err := dec.Decode(); err != nil {
+		return fmt.Errorf("failed decode private: %w", err)
+	}
+
+	if _, err := dec.Decode(); err != nil {
+		return fmt.Errorf("failed decode public: %w", err)
+	}
+
+	if _, err := dec.Decode(); err != nil {
+		return fmt.Errorf("failed decode seed: %w", err)
+	}
+
+	if _, err := dec.Decode(); err != io.EOF {
+		return fmt.Errorf("trailing data mismatch: %w", err)
+	}
+
+	return nil
+}
+
 func (t *TPM) SignASN1(keyHandle, applicationParam, digest []byte) ([]byte, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -200,26 +224,32 @@ func (t *TPM) SignASN1(keyHandle, applicationParam, digest []byte) ([]byte, erro
 
 	dec := lencode.NewDecoder(bytes.NewReader(keyHandle), lencode.SeparatorOpt(separator))
 
-	invalidHandleErr := fmt.Errorf("invalid key handle")
-
 	private, err := dec.Decode()
 	if err != nil {
-		return nil, invalidHandleErr
+		log.Printf("TPM SignASN1: invalid key handle (failed decode private), len=%d, err=%v", len(keyHandle), err)
+
+		return nil, fmt.Errorf("invalid key handle: failed decode private: %w", err)
 	}
 
 	public, err := dec.Decode()
 	if err != nil {
-		return nil, invalidHandleErr
+		log.Printf("TPM SignASN1: invalid key handle (failed decode public), len=%d, err=%v", len(keyHandle), err)
+
+		return nil, fmt.Errorf("invalid key handle: failed decode public: %w", err)
 	}
 
 	seed, err := dec.Decode()
 	if err != nil {
-		return nil, invalidHandleErr
+		log.Printf("TPM SignASN1: invalid key handle (failed decode seed), len=%d, err=%v", len(keyHandle), err)
+
+		return nil, fmt.Errorf("invalid key handle: failed decode seed: %w", err)
 	}
 
 	_, err = dec.Decode()
 	if err != io.EOF {
-		return nil, invalidHandleErr
+		log.Printf("TPM SignASN1: invalid key handle (trailing data mismatch), len=%d, err=%v", len(keyHandle), err)
+
+		return nil, fmt.Errorf("invalid key handle: trailing data mismatch: %w", err)
 	}
 
 	srkTemplate := primaryKeyTmpl(seed, applicationParam)

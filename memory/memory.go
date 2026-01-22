@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"fmt"
+	"log"
 	"math/big"
 
 	"golang.org/x/crypto/chacha20poly1305"
@@ -69,6 +70,15 @@ func (m *Mem) DeriveCredRandom(credentialID []byte) ([]byte, error) {
 	return mac.Sum(nil), nil
 }
 
+func (m *Mem) ValidateKeyHandle(keyHandle []byte) error {
+	// Ensure it's at least the size of a nonce plus some ciphertext.
+	if len(keyHandle) < chacha20poly1305.NonceSizeX+1 {
+		return fmt.Errorf("key handle too small: %d", len(keyHandle))
+	}
+
+	return nil
+}
+
 func (m *Mem) SignASN1(keyHandle, applicationParam, digest []byte) ([]byte, error) {
 	aead, err := chacha20poly1305.NewX(m.masterPrivateKey)
 	if err != nil {
@@ -76,6 +86,8 @@ func (m *Mem) SignASN1(keyHandle, applicationParam, digest []byte) ([]byte, erro
 	}
 
 	if len(keyHandle) < chacha20poly1305.NonceSizeX {
+		log.Printf("Mem SignASN1: invalid key handle len=%d (smaller than nonce %d)", len(keyHandle), chacha20poly1305.NonceSizeX)
+
 		return nil, fmt.Errorf("incorrect size for key handle: %d smaller than nonce)", len(keyHandle))
 	}
 	nonce := keyHandle[:chacha20poly1305.NonceSizeX]

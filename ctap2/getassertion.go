@@ -7,14 +7,12 @@ import (
 	"time"
 
 	"github.com/fxamacker/cbor/v2"
+	"github.com/psanford/tpm-fido/storage"
 )
 
 // GetAssertion handles the authenticatorGetAssertion command
 func (h *Handler) GetAssertion(ctx context.Context, req *GetAssertionRequest) (byte, []byte) {
 	log.Printf("CTAP2 GetAssertion: RPID=%s, allowList=%d credentials", req.RPID, len(req.AllowList))
-
-	// Clear any previous assertion state
-	h.assertionState = nil
 
 	// Validate clientDataHash
 	if len(req.ClientDataHash) != 32 {
@@ -25,63 +23,60 @@ func (h *Handler) GetAssertion(ctx context.Context, req *GetAssertionRequest) (b
 	// Compute rpIdHash
 	rpIDHash := HashRPID(req.RPID)
 
-	// Try to find credentials either from allowList or storage
-	var matchedCredentials []*CredentialMetadata
-	var matchedFromAllowList *PublicKeyCredentialDescriptor
+	// Find a valid credential from the allowList
+	var matchedCredential *PublicKeyCredentialDescriptor
+	for i := range req.AllowList {
+		cred := &req.AllowList[i]
 
-	if len(req.AllowList) > 0 {
-		// Path 1: Server-side credential (allowList provided)
-		// Find a valid credential from the allowList by checking if we can sign with it
-		for i := range req.AllowList {
-			cred := &req.AllowList[i]
-			// Try to sign with a dummy hash to check if credential is valid
+		// Ask the signer to validate the key handle format before attempting heavy work.
+		if err := h.signer.ValidateKeyHandle(cred.ID); err != nil {
+			log.Printf("CTAP2 GetAssertion: skipping credential len=%d; not our key handle: %v", len(cred.ID), err)
+
+			continue
+		}
+
+		// Try to sign with a dummy hash to check if credential is valid
+		dummyHash := sha256.Sum256([]byte("credential-check"))
+		_, err := h.signer.SignASN1(cred.ID, rpIDHash[:], dummyHash[:])
+		if err == nil {
+			matchedCredential = cred
+			log.Printf("CTAP2 GetAssertion: Found valid credential, ID length=%d", len(cred.ID))
+			break
+		} else {
+			idSum := sha256.Sum256(cred.ID)
+
+			log.Printf("CTAP2 GetAssertion: credential check failed for ID len=%d, SHA256=%x: %v", len(cred.ID), idSum, err)
+		}
+	}
+
+	if matchedCredential == nil {
+		log.Printf("CTAP2 GetAssertion: No valid credential found in allowList; attempting stored credentials for RP=%s", req.RPID)
+		stored, err := storage.GetCredentialsForRPID(req.RPID)
+		if err != nil {
+			log.Printf("CTAP2 GetAssertion: error reading stored credentials: %v", err)
+			return StatusNoCredentials, nil
+		}
+
+		for _, c := range stored {
+			log.Printf("CTAP2 GetAssertion: trying stored credential len=%d", len(c))
+
 			dummyHash := sha256.Sum256([]byte("credential-check"))
-			_, err := h.signer.SignASN1(cred.ID, rpIDHash[:], dummyHash[:])
-			if err == nil {
-				matchedFromAllowList = cred
-				log.Printf("CTAP2 GetAssertion: Found valid credential in allowList, ID length=%d", len(cred.ID))
+			if _, err := h.signer.SignASN1(c, rpIDHash[:], dummyHash[:]); err == nil {
+				matchedCredential = &PublicKeyCredentialDescriptor{Type: CredentialTypePublicKey, ID: c}
+
+				log.Printf("CTAP2 GetAssertion: Found valid stored credential, ID length=%d", len(c))
+
 				break
-			}
-		}
-
-		if matchedFromAllowList == nil {
-			log.Printf("CTAP2 GetAssertion: No valid credential found in allowList")
-			return StatusNoCredentials, nil
-		}
-	} else {
-		// Path 2: Resident key discovery (no allowList)
-		// Look up credentials by rpId from storage
-		if h.storage == nil {
-			log.Printf("CTAP2 GetAssertion: No storage available for credential discovery")
-			return StatusNoCredentials, nil
-		}
-
-		matchedCredentials = h.storage.GetByRPID(req.RPID)
-		if len(matchedCredentials) == 0 {
-			log.Printf("CTAP2 GetAssertion: No discoverable credentials found for RP=%s", req.RPID)
-			return StatusNoCredentials, nil
-		}
-
-		log.Printf("CTAP2 GetAssertion: Found %d discoverable credential(s) for RP=%s", len(matchedCredentials), req.RPID)
-
-		// Verify each credential is still valid (can still sign with it)
-		validCredentials := make([]*CredentialMetadata, 0, len(matchedCredentials))
-		for _, cred := range matchedCredentials {
-			dummyHash := sha256.Sum256([]byte("credential-check"))
-			_, err := h.signer.SignASN1(cred.CredentialID, rpIDHash[:], dummyHash[:])
-			if err == nil {
-				validCredentials = append(validCredentials, cred)
 			} else {
-				log.Printf("CTAP2 GetAssertion: Stored credential no longer valid (TPM key deleted?), user=%s", cred.UserName)
+				log.Printf("CTAP2 GetAssertion: stored credential failed: %v", err)
 			}
 		}
 
-		if len(validCredentials) == 0 {
-			log.Printf("CTAP2 GetAssertion: All stored credentials are invalid")
+		if matchedCredential == nil {
+			log.Printf("CTAP2 GetAssertion: No stored credential matched")
+
 			return StatusNoCredentials, nil
 		}
-
-		matchedCredentials = validCredentials
 	}
 
 	// Request user presence
@@ -110,40 +105,16 @@ func (h *Handler) GetAssertion(ctx context.Context, req *GetAssertionRequest) (b
 		return StatusUserActionTimeout, nil
 	}
 
-	// Handle the two different paths for response building
-	if matchedFromAllowList != nil {
-		// Non-resident credential path - use the old behavior
-		return h.buildNonResidentAssertionResponse(ctx, matchedFromAllowList, rpIDHash, req.ClientDataHash, req.Extensions)
-	}
-
-	// Resident credential path
-	// Store state for GetNextAssertion if multiple credentials
-	if len(matchedCredentials) > 1 {
-		h.assertionState = &assertionState{
-			credentials:     matchedCredentials,
-			currentIndex:    0,
-			rpIDHash:        rpIDHash,
-			clientDataHash:  req.ClientDataHash,
-			extensionsInput: req.Extensions,
-		}
-	}
-
-	// Return the first credential
-	return h.buildAssertionResponse(ctx, matchedCredentials[0], rpIDHash, req.ClientDataHash, req.Extensions, len(matchedCredentials), true)
-}
-
-// buildNonResidentAssertionResponse builds a response for non-resident (server-side) credentials
-func (h *Handler) buildNonResidentAssertionResponse(ctx context.Context, cred *PublicKeyCredentialDescriptor, rpIDHash [32]byte, clientDataHash []byte, extensions map[string]interface{}) (byte, []byte) {
 	// Process hmac-secret extension if present
 	var extensionsOutput []byte
-	log.Printf("CTAP2 GetAssertion: Extensions=%+v", extensions)
-	if extensions != nil {
-		for k, v := range extensions {
+	log.Printf("CTAP2 GetAssertion: Extensions=%+v", req.Extensions)
+	if req.Extensions != nil {
+		for k, v := range req.Extensions {
 			log.Printf("CTAP2 GetAssertion: Extension key=%q, value type=%T", k, v)
 		}
-		if hmacSecretInput, ok := extensions["hmac-secret"]; ok {
+		if hmacSecretInput, ok := req.Extensions["hmac-secret"]; ok {
 			log.Printf("CTAP2 GetAssertion: Processing hmac-secret extension")
-			hmacOutput, err := h.processHmacSecret(cred.ID, hmacSecretInput)
+			hmacOutput, err := h.processHmacSecret(matchedCredential.ID, hmacSecretInput)
 			if err != nil {
 				log.Printf("CTAP2 GetAssertion: hmac-secret error: %s", err)
 				return StatusExtensionFirst, nil
@@ -170,10 +141,10 @@ func (h *Handler) buildNonResidentAssertionResponse(ctx context.Context, cred *P
 	authDataBytes := authData.Marshal()
 
 	// Sign authData || clientDataHash
-	toSign := append(authDataBytes, clientDataHash...)
+	toSign := append(authDataBytes, req.ClientDataHash...)
 	sigHash := sha256.Sum256(toSign)
 
-	sig, err := h.signer.SignASN1(cred.ID, rpIDHash[:], sigHash[:])
+	sig, err := h.signer.SignASN1(matchedCredential.ID, rpIDHash[:], sigHash[:])
 	if err != nil {
 		log.Printf("CTAP2 GetAssertion: Sign error: %s", err)
 		return StatusOther, nil
@@ -183,7 +154,7 @@ func (h *Handler) buildNonResidentAssertionResponse(ctx context.Context, cred *P
 	resp := &GetAssertionResponse{
 		Credential: &PublicKeyCredentialDescriptor{
 			Type: CredentialTypePublicKey,
-			ID:   cred.ID,
+			ID:   matchedCredential.ID,
 		},
 		AuthData:  authDataBytes,
 		Signature: sig,
@@ -199,87 +170,6 @@ func (h *Handler) buildNonResidentAssertionResponse(ctx context.Context, cred *P
 	return StatusSuccess, encoded
 }
 
-// buildAssertionResponse builds a response for resident (discoverable) credentials
-func (h *Handler) buildAssertionResponse(ctx context.Context, cred *CredentialMetadata, rpIDHash [32]byte, clientDataHash []byte, extensions map[string]interface{}, totalCredentials int, isFirstResponse bool) (byte, []byte) {
-	// Process hmac-secret extension if present
-	var extensionsOutput []byte
-	if isFirstResponse {
-		log.Printf("CTAP2 GetAssertion: Extensions=%+v", extensions)
-	}
-	if extensions != nil {
-		if isFirstResponse {
-			for k, v := range extensions {
-				log.Printf("CTAP2 GetAssertion: Extension key=%q, value type=%T", k, v)
-			}
-		}
-		if hmacSecretInput, ok := extensions["hmac-secret"]; ok {
-			log.Printf("CTAP2 GetAssertion: Processing hmac-secret extension for credential user=%s", cred.UserName)
-			hmacOutput, err := h.processHmacSecret(cred.CredentialID, hmacSecretInput)
-			if err != nil {
-				log.Printf("CTAP2 GetAssertion: hmac-secret error: %s", err)
-				return StatusExtensionFirst, nil
-			}
-			extMap := map[string][]byte{"hmac-secret": hmacOutput}
-			extensionsOutput, _ = ctapEncMode.Marshal(extMap)
-		}
-	}
-
-	// Build flags
-	flags := byte(FlagUserPresent | FlagUserVerified)
-	if len(extensionsOutput) > 0 {
-		flags |= FlagExtensionData
-	}
-
-	// Build AuthenticatorData (no attested credential data for assertion)
-	authData := &AuthenticatorData{
-		RPIDHash:   rpIDHash,
-		Flags:      flags,
-		SignCount:  h.signer.Counter(),
-		Extensions: extensionsOutput,
-	}
-
-	authDataBytes := authData.Marshal()
-
-	// Sign authData || clientDataHash
-	toSign := append(authDataBytes, clientDataHash...)
-	sigHash := sha256.Sum256(toSign)
-
-	sig, err := h.signer.SignASN1(cred.CredentialID, rpIDHash[:], sigHash[:])
-	if err != nil {
-		log.Printf("CTAP2 GetAssertion: Sign error: %s", err)
-		return StatusOther, nil
-	}
-
-	// Build response with User field for resident credentials
-	resp := &GetAssertionResponse{
-		Credential: &PublicKeyCredentialDescriptor{
-			Type: CredentialTypePublicKey,
-			ID:   cred.CredentialID,
-		},
-		AuthData:  authDataBytes,
-		Signature: sig,
-		User: &PublicKeyCredentialUserEntity{
-			ID:          cred.UserID,
-			Name:        cred.UserName,
-			DisplayName: cred.UserDisplayName,
-		},
-	}
-
-	// Include numberOfCredentials in first response if there are multiple
-	if isFirstResponse && totalCredentials > 1 {
-		resp.NumberOfCredentials = uint(totalCredentials)
-	}
-
-	encoded, err := ctapEncMode.Marshal(resp)
-	if err != nil {
-		log.Printf("CTAP2 GetAssertion: Response encode error: %s", err)
-		return StatusOther, nil
-	}
-
-	log.Printf("CTAP2 GetAssertion: Success (resident, user=%s), response=%d bytes", cred.UserName, len(encoded))
-	return StatusSuccess, encoded
-}
-
 // parseGetAssertionRequest parses the CBOR-encoded GetAssertion request
 func parseGetAssertionRequest(data []byte) (*GetAssertionRequest, error) {
 	var req GetAssertionRequest
@@ -287,162 +177,4 @@ func parseGetAssertionRequest(data []byte) (*GetAssertionRequest, error) {
 		return nil, err
 	}
 	return &req, nil
-}
-
-// GetAssertionParams contains the parameters for GetAssertionDirect
-type GetAssertionParams struct {
-	ClientDataHash   []byte
-	RPID             string
-	AllowCredentials [][]byte // List of credential IDs to allow (empty for discoverable)
-	HmacSecretInput  interface{} // Raw hmac-secret input (for ECDH flow during authentication)
-}
-
-// GetAssertionDirect creates an assertion without user presence handling.
-// The caller is responsible for confirming user presence before calling this method.
-// This method is designed for Native Messaging where the webauthn handler controls the flow.
-func (h *Handler) GetAssertionDirect(ctx context.Context, params *GetAssertionParams) (*GetAssertionResult, error) {
-	log.Printf("CTAP2 GetAssertionDirect: RPID=%s, allowCredentials=%d", params.RPID, len(params.AllowCredentials))
-
-	// Validate clientDataHash
-	if len(params.ClientDataHash) != 32 {
-		return nil, ErrInvalidParameter
-	}
-
-	// Compute rpIdHash
-	rpIDHash := HashRPID(params.RPID)
-
-	var credentialID []byte
-	var userHandle []byte
-	var userName string
-	var userDisplayName string
-
-	if len(params.AllowCredentials) > 0 {
-		// Path 1: Server-side credential (allowCredentials provided)
-		// Find a valid credential by checking if we can sign with it
-		for _, cred := range params.AllowCredentials {
-			dummyHash := sha256.Sum256([]byte("credential-check"))
-			_, err := h.signer.SignASN1(cred, rpIDHash[:], dummyHash[:])
-			if err == nil {
-				credentialID = cred
-				log.Printf("CTAP2 GetAssertionDirect: Found valid credential in allowList, ID length=%d", len(cred))
-				break
-			}
-		}
-
-		if credentialID == nil {
-			log.Printf("CTAP2 GetAssertionDirect: No valid credential found in allowList")
-			return nil, ErrNoCredentials
-		}
-	} else {
-		// Path 2: Resident key discovery (no allowCredentials)
-		if h.storage == nil {
-			log.Printf("CTAP2 GetAssertionDirect: No storage available for credential discovery")
-			return nil, ErrNoCredentials
-		}
-
-		matchedCredentials := h.storage.GetByRPID(params.RPID)
-		if len(matchedCredentials) == 0 {
-			log.Printf("CTAP2 GetAssertionDirect: No discoverable credentials found for RP=%s", params.RPID)
-			return nil, ErrNoCredentials
-		}
-
-		// Find the first valid credential
-		for _, cred := range matchedCredentials {
-			dummyHash := sha256.Sum256([]byte("credential-check"))
-			_, err := h.signer.SignASN1(cred.CredentialID, rpIDHash[:], dummyHash[:])
-			if err == nil {
-				credentialID = cred.CredentialID
-				userHandle = cred.UserID
-				userName = cred.UserName
-				userDisplayName = cred.UserDisplayName
-				log.Printf("CTAP2 GetAssertionDirect: Found valid discoverable credential, user=%s", cred.UserName)
-				break
-			}
-		}
-
-		if credentialID == nil {
-			log.Printf("CTAP2 GetAssertionDirect: All stored credentials are invalid")
-			return nil, ErrNoCredentials
-		}
-	}
-
-	// Process hmac-secret extension if present
-	var hmacSecretOutput []byte
-	if params.HmacSecretInput != nil {
-		log.Printf("CTAP2 GetAssertionDirect: Processing hmac-secret extension")
-		output, err := h.processHmacSecret(credentialID, params.HmacSecretInput)
-		if err != nil {
-			log.Printf("CTAP2 GetAssertionDirect: hmac-secret error: %s", err)
-			return nil, err
-		}
-		hmacSecretOutput = output
-	}
-
-	// Build flags
-	flags := byte(FlagUserPresent | FlagUserVerified)
-	if len(hmacSecretOutput) > 0 {
-		flags |= FlagExtensionData
-	}
-
-	// Build extensions output if hmac-secret was processed
-	var extensionsOutput []byte
-	if len(hmacSecretOutput) > 0 {
-		extMap := map[string][]byte{"hmac-secret": hmacSecretOutput}
-		extensionsOutput, _ = ctapEncMode.Marshal(extMap)
-	}
-
-	// Build AuthenticatorData (no attested credential data for assertion)
-	authData := &AuthenticatorData{
-		RPIDHash:   rpIDHash,
-		Flags:      flags,
-		SignCount:  h.signer.Counter(),
-		Extensions: extensionsOutput,
-	}
-
-	authDataBytes := authData.Marshal()
-
-	// Sign authData || clientDataHash
-	toSign := append(authDataBytes, params.ClientDataHash...)
-	sigHash := sha256.Sum256(toSign)
-
-	sig, err := h.signer.SignASN1(credentialID, rpIDHash[:], sigHash[:])
-	if err != nil {
-		log.Printf("CTAP2 GetAssertionDirect: Sign error: %s", err)
-		return nil, err
-	}
-
-	log.Printf("CTAP2 GetAssertionDirect: Success, credentialID=%d bytes, signature=%d bytes", len(credentialID), len(sig))
-
-	return &GetAssertionResult{
-		CredentialID:      credentialID,
-		AuthenticatorData: authDataBytes,
-		Signature:         sig,
-		UserHandle:        userHandle,
-		UserName:          userName,
-		UserDisplayName:   userDisplayName,
-		HmacSecretOutput:  hmacSecretOutput,
-	}, nil
-}
-
-// FindCredentials finds valid credentials for an RP, returns their IDs and user info
-// This is useful for the WebAuthn layer to present a credential selection UI
-func (h *Handler) FindCredentials(rpID string) []*CredentialMetadata {
-	if h.storage == nil {
-		return nil
-	}
-
-	rpIDHash := HashRPID(rpID)
-	matchedCredentials := h.storage.GetByRPID(rpID)
-
-	// Filter to only valid credentials
-	validCredentials := make([]*CredentialMetadata, 0, len(matchedCredentials))
-	for _, cred := range matchedCredentials {
-		dummyHash := sha256.Sum256([]byte("credential-check"))
-		_, err := h.signer.SignASN1(cred.CredentialID, rpIDHash[:], dummyHash[:])
-		if err == nil {
-			validCredentials = append(validCredentials, cred)
-		}
-	}
-
-	return validCredentials
 }
