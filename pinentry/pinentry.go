@@ -1,9 +1,11 @@
 package pinentry
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"os/exec"
 	"sync"
@@ -143,9 +145,10 @@ func (pe *Pinentry) prompt(req *request, prompt string) {
 	}
 }
 
-func FindPinentryGUIPath() string {
-	// Prefer Qt on Wayland as it tends to work better
-	candidates := []string{
+func FindPinentryCandidates() []string {
+	// Prefer Qt on Wayland as it tends to work better, then GTK/X11/fltk,
+	// then curses/tty and finally generic `pinentry`.
+	return []string{
 		"pinentry-qt5",
 		"pinentry-qt",
 		"pinentry-gnome3",
@@ -154,8 +157,14 @@ func FindPinentryGUIPath() string {
 		"pinentry-gtk",
 		"pinentry-x11",
 		"pinentry-fltk",
+		"pinentry-curses",
+		"pinentry-tty",
+		"pinentry",
 	}
-	for _, candidate := range candidates {
+}
+
+func FindPinentryGUIPath() string {
+	for _, candidate := range FindPinentryCandidates() {
 		p, _ := exec.LookPath(candidate)
 		if p != "" {
 			return p
@@ -165,34 +174,78 @@ func FindPinentryGUIPath() string {
 }
 
 func launchPinEntry(ctx context.Context) (*pinentry.Client, *exec.Cmd, error) {
-	pinEntryCmd := FindPinentryGUIPath()
-	if pinEntryCmd == "" {
-		log.Printf("Failed to detect gui pinentry binary. Falling back to default `pinentry`")
-		pinEntryCmd = "pinentry"
-	}
-	cmd := exec.CommandContext(ctx, pinEntryCmd)
+	candidates := FindPinentryCandidates()
+	var lastErr error
+	for _, pinEntryCmd := range candidates {
+		if p, _ := exec.LookPath(pinEntryCmd); p == "" {
+			continue
+		}
 
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return nil, nil, err
-	}
-	stdin, err := cmd.StdinPipe()
-	if err != nil {
-		return nil, nil, err
+		cmd := exec.CommandContext(ctx, pinEntryCmd)
+
+		stdout, err := cmd.StdoutPipe()
+		if err != nil {
+			lastErr = err
+
+			continue
+		}
+
+		stdin, err := cmd.StdinPipe()
+		if err != nil {
+			lastErr = err
+
+			continue
+		}
+
+		stderr, err := cmd.StderrPipe()
+		if err != nil {
+			/* INFO: Not fatal, so just log and continue with stderr = nil */
+			log.Printf("pinentry: warning: failed to get stderr pipe for %s: %v", pinEntryCmd, err)
+
+			stderr = nil
+		}
+
+		var stderrBuf bytes.Buffer
+		if stderr != nil {
+			go func() {
+				io.Copy(&stderrBuf, stderr)
+			}()
+		}
+
+		if err := cmd.Start(); err != nil {
+			log.Printf("pinentry: failed to start %s: %v", pinEntryCmd, err)
+
+			lastErr = err
+
+			continue
+		}
+
+		var c pinentry.Client
+		c.Session, err = assuan.Init(assuan.ReadWriteCloser{
+			ReadCloser:  stdout,
+			WriteCloser: stdin,
+		})
+
+		if err != nil {
+			/* INFO: If stderr reports something, log it for debugging */
+			stderrStr := stderrBuf.String()
+			_ = cmd.Process.Kill()
+			cmd.Wait()
+
+			lastErr = fmt.Errorf("%w; stderr=%q", err, stderrStr)
+			log.Printf("pinentry: %s assuan.Init failed: %v", pinEntryCmd, lastErr)
+
+			continue
+		}
+
+		log.Printf("pinentry: launched successfully, cmd=%v", cmd.Args)
+
+		return &c, cmd, nil
 	}
 
-	if err := cmd.Start(); err != nil {
-		return nil, nil, err
+	if lastErr != nil {
+		return nil, nil, lastErr
 	}
 
-	var c pinentry.Client
-	c.Session, err = assuan.Init(assuan.ReadWriteCloser{
-		ReadCloser:  stdout,
-		WriteCloser: stdin,
-	})
-
-	if err != nil {
-		return nil, nil, err
-	}
-	return &c, cmd, nil
+	return nil, nil, fmt.Errorf("no pinentry candidate found")
 }
