@@ -2,13 +2,10 @@ package ctap2
 
 import (
 	"context"
-	"crypto/ecdsa"
-	"crypto/rand"
 	"crypto/sha256"
 	"log"
 
 	"github.com/fxamacker/cbor/v2"
-	"github.com/psanford/tpm-fido/attestation"
 	"github.com/psanford/tpm-fido/pinentry"
 	"github.com/psanford/tpm-fido/storage"
 )
@@ -16,6 +13,7 @@ import (
 // MakeCredential handles the authenticatorMakeCredential command
 func (h *Handler) MakeCredential(ctx context.Context, req *MakeCredentialRequest) (byte, []byte) {
 	log.Printf("CTAP2 MakeCredential: RP=%s, User=%s", req.RP.ID, req.User.Name)
+	log.Printf("CTAP2 MakeCredential: PubKeyCredParams=%+v, Options=%+v, Extensions=%+v", req.PubKeyCredParams, req.Options, req.Extensions)
 
 	// Ignore dummy blink probes (such as Firefox's make.me.blink) without prompting user
 	if req.RP.ID == "make.me.blink" {
@@ -138,21 +136,21 @@ func (h *Handler) MakeCredential(ctx context.Context, req *MakeCredentialRequest
 
 	authDataBytes := authData.Marshal()
 
-	// Build attestation signature: sign(authData || clientDataHash)
+	// Build attestation signature: sign(authData || clientDataHash) using
+	// the newly generated credential's private key (self-attestation per WebAuthn § 8.2).
 	toSign := append(authDataBytes, req.ClientDataHash...)
 	sigHash := sha256.Sum256(toSign)
 
-	sig, err := ecdsa.SignASN1(rand.Reader, attestation.PrivateKey, sigHash[:])
+	sig, err := h.signer.SignASN1(credentialID, rpIDHash[:], sigHash[:])
 	if err != nil {
-		log.Printf("CTAP2 MakeCredential: Attestation sign error: %s", err)
+		log.Printf("CTAP2 MakeCredential: Self-attestation sign error: %s", err)
 		return StatusOther, nil
 	}
 
-	// Build attestation statement (packed format with x5c)
+	// Build attestation statement (packed self-attestation format, omitting x5c)
 	attStmt := map[string]interface{}{
 		"alg": COSEAlgES256,
 		"sig": sig,
-		"x5c": [][]byte{attestation.CertDer},
 	}
 
 	// Build response
