@@ -14,9 +14,9 @@ func (h *Handler) GetInfo() *GetInfoResponse {
 
 		// Authenticator options
 		Options: map[string]bool{
-			"rk":   false, // Resident keys not supported (no persistent storage)
-			"up":   true,  // User presence supported via fingerprint
-			"uv":   true,  // User verification via fingerprint (enables hmac-secret without PIN)
+			"rk":   true,  // Resident keys supported (persisted in local storage)
+			"up":   true,  // User presence supported
+			"uv":   true,  // User verification supported
 			"plat": false, // Not a platform authenticator
 		},
 
