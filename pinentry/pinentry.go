@@ -15,6 +15,17 @@ import (
 	"github.com/foxcpp/go-assuan/pinentry"
 )
 
+const (
+	// TimeoutU2F is the user-presence timeout for U2F (CTAP1) requests.
+	// U2F clients poll roughly every 750ms and each poll extends the
+	// timer, so this only needs to cover the gap between polls.
+	TimeoutU2F = 2 * time.Second
+	// TimeoutCTAP2 is the user-presence timeout for CTAP2 requests.
+	// CTAP2 clients send a single request and wait silently (no polling),
+	// so the dialog must stay up long enough for a human to respond.
+	TimeoutCTAP2 = 30 * time.Second
+)
+
 func New() *Pinentry {
 	return &Pinentry{}
 }
@@ -26,11 +37,25 @@ type Pinentry struct {
 
 type request struct {
 	timeout       time.Duration
-	pendingResult chan Result
 	extendTimeout chan time.Duration
 
 	challengeParam   [32]byte
 	applicationParam [32]byte
+
+	// subscribers holds one buffered channel per waiter sharing this
+	// prompt, so every waiter observes the result (broadcast on completion).
+	mu          sync.Mutex
+	subscribers []chan Result
+}
+
+// subscribe registers a new waiter on the request. The returned channel is
+// buffered so a waiter that stopped listening never blocks delivery.
+func (r *request) subscribe() <-chan Result {
+	ch := make(chan Result, 1)
+	r.mu.Lock()
+	r.subscribers = append(r.subscribers, ch)
+	r.mu.Unlock()
+	return ch
 }
 
 type Result struct {
@@ -38,51 +63,50 @@ type Result struct {
 	Error error
 }
 
-func (pe *Pinentry) ConfirmPresence(prompt string, challengeParam, applicationParam [32]byte) (chan Result, error) {
+func (pe *Pinentry) ConfirmPresence(prompt string, challengeParam, applicationParam [32]byte, timeout time.Duration) (<-chan Result, error) {
 	pe.mu.Lock()
 	defer pe.mu.Unlock()
-
-	timeout := 2 * time.Second
 
 	if pe.activeRequest != nil {
 		if challengeParam != pe.activeRequest.challengeParam || applicationParam != pe.activeRequest.applicationParam {
 			return nil, errors.New("other request already in progress")
 		}
 
-		extendTimeoutChan := pe.activeRequest.extendTimeout
+		req := pe.activeRequest
 
 		go func() {
 			select {
-			case extendTimeoutChan <- timeout:
-			case <-time.After(timeout):
+			case req.extendTimeout <- req.timeout:
+			case <-time.After(req.timeout):
 			}
 		}()
 
-		return pe.activeRequest.pendingResult, nil
+		return req.subscribe(), nil
 	}
 
 	pe.activeRequest = &request{
 		timeout:          timeout,
 		challengeParam:   challengeParam,
 		applicationParam: applicationParam,
-		pendingResult:    make(chan Result),
 		extendTimeout:    make(chan time.Duration),
 	}
 
-	go pe.prompt(pe.activeRequest, prompt)
+	req := pe.activeRequest
+	go pe.prompt(req, prompt)
 
-	return pe.activeRequest.pendingResult, nil
+	return req.subscribe(), nil
 }
 
 func (pe *Pinentry) prompt(req *request, prompt string) {
 	sendResult := func(r Result) {
-		select {
-		case req.pendingResult <- r:
-		case <-time.After(req.timeout):
-			// we expect requests to come in every ~750ms.
-			// If we've been waiting for 2 seconds the client
-			// is likely gone.
+		req.mu.Lock()
+		for _, sub := range req.subscribers {
+			select {
+			case sub <- r:
+			default:
+			}
 		}
+		req.mu.Unlock()
 
 		pe.mu.Lock()
 		pe.activeRequest = nil

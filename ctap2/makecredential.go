@@ -6,16 +6,22 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"log"
-	"time"
 
 	"github.com/fxamacker/cbor/v2"
 	"github.com/psanford/tpm-fido/attestation"
+	"github.com/psanford/tpm-fido/pinentry"
 	"github.com/psanford/tpm-fido/storage"
 )
 
 // MakeCredential handles the authenticatorMakeCredential command
 func (h *Handler) MakeCredential(ctx context.Context, req *MakeCredentialRequest) (byte, []byte) {
 	log.Printf("CTAP2 MakeCredential: RP=%s, User=%s", req.RP.ID, req.User.Name)
+
+	// Ignore dummy blink probes (such as Firefox's make.me.blink) without prompting user
+	if req.RP.ID == "make.me.blink" {
+		log.Printf("CTAP2 MakeCredential: make.me.blink dummy probe, ignoring without user presence")
+		return StatusOperationDenied, nil
+	}
 
 	// Validate clientDataHash
 	if len(req.ClientDataHash) != 32 {
@@ -54,14 +60,14 @@ func (h *Handler) MakeCredential(ctx context.Context, req *MakeCredentialRequest
 	copy(challengeParam[:], req.ClientDataHash)
 	copy(appParam[:], rpIDHash[:])
 
-	pinResultCh, err := h.presence.ConfirmPresence("FIDO2 Confirm Register", challengeParam, appParam)
+	pinResultCh, err := h.presence.ConfirmPresence("FIDO2 Confirm Register", challengeParam, appParam, pinentry.TimeoutCTAP2)
 	if err != nil {
 		log.Printf("CTAP2 MakeCredential: user presence error: %s", err)
 		return StatusOperationDenied, nil
 	}
 
-	// Wait for user response with timeout
-	childCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	// Wait for user response, bounded by the pinentry dialog timeout.
+	childCtx, cancel := context.WithTimeout(ctx, pinentry.TimeoutCTAP2)
 	defer cancel()
 
 	select {

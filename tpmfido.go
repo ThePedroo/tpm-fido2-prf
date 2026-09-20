@@ -183,7 +183,7 @@ func (s *server) handleAuthenticate(parentCtx context.Context, token *fidohid.So
 
 	if req.Authenticate.Ctrl == fidoauth.CtrlEnforeUserPresenceAndSign {
 
-		pinResultCh, err := s.pe.ConfirmPresence("FIDO Confirm Auth", req.Authenticate.ChallengeParam, req.Authenticate.ApplicationParam)
+		pinResultCh, err := s.pe.ConfirmPresence("FIDO Confirm Auth", req.Authenticate.ChallengeParam, req.Authenticate.ApplicationParam, pinentry.TimeoutU2F)
 
 		if err != nil {
 			log.Printf("user presence err: %s", err)
@@ -255,7 +255,7 @@ func (s *server) handleRegister(parentCtx context.Context, token *fidohid.SoftTo
 	defer cancel()
 	req := evt.Req
 
-	pinResultCh, err := s.pe.ConfirmPresence("FIDO Confirm Register", req.Register.ChallengeParam, req.Register.ApplicationParam)
+	pinResultCh, err := s.pe.ConfirmPresence("FIDO Confirm Register", req.Register.ChallengeParam, req.Register.ApplicationParam, pinentry.TimeoutU2F)
 
 	if err != nil {
 		log.Printf("user presence err: %s", err)
